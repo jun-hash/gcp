@@ -1,0 +1,7 @@
+requests
+numpy
+soundfile
+torch
+torchaudio
+tqdm
+google-cloud-storage
