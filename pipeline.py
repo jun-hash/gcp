@@ -296,7 +296,6 @@ def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, ou
         start_idx, end_idx = int(start * samplerate), int(end * samplerate)
         slice_audio = data[start_idx:end_idx]
 
-        # ✅ segment가 max_len_sec을 초과하면 저장 후 새로운 segment 시작
         if length_accumulated + (end - start) > max_len_sec:
             save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
             segment_index += 1
@@ -306,7 +305,6 @@ def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, ou
         to_stitch.append(slice_audio)
         length_accumulated += (end - start)
 
-    # ✅ 마지막 segment 처리 (15초 이상이면 저장, 15초 미만이면 버림)
     if to_stitch and length_accumulated >= min_len_sec:
         save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
     else:
