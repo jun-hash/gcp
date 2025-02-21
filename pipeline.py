@@ -40,7 +40,7 @@ def get_vad_model():
     """Loads the Silero VAD model and utils, ensuring it's only loaded once."""
     global _VAD_MODEL, _VAD_UTILS
     if _VAD_MODEL is None:
-        _VAD_MODEL, _VAD_UTILS = torch.hub.load('snakers4/silero-vad', 'silero_vad', force_reload=False)
+        _VAD_MODEL, _VAD_UTILS = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True,force_reload=False)
     return _VAD_MODEL, _VAD_UTILS
 
 ########################################
