@@ -31,7 +31,7 @@ DEFAULT_N_PROCESSES = multiprocessing.cpu_count()  # Use all available cores
 DEFAULT_MIN_SPEECH_DURATION = 0.5
 DEFAULT_TARGET_LEN_SEC = 30
 DEFAULT_GCS_BUCKET = "nari-librivox-test"
-DEFAULT_GCS_PREFIX = "test"
+DEFAULT_GCS_PREFIX = "v1"
 # Global variable to hold the VAD model
 _VAD_MODEL = None
 _VAD_UTILS = None
