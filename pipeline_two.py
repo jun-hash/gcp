@@ -523,13 +523,7 @@ def run_pipeline(args):
     remove_intro_segments(cut_dir)
     stage_timer.end("RemoveIntro")
 
-    # 최종 오디오 길이 계산
-    print("\n[Audio Length] Calculating total hours after cutting...")
-    total_hours_final = calculate_total_audio_hours(cut_dir, ext=".mp3")
-    print(f"[Audio Length] Final total hours (after cutting) = {total_hours_final:.2f} hours")
-    if total_hours_after_conversion > 0:
-        ratio = (total_hours_final / total_hours_after_conversion) * 100
-        print(f" => Retained {ratio:.2f}% of originally converted audio.")
+
 
     # 6. (옵션) Storage Upload
     if args.gcs_bucket:
@@ -543,6 +537,13 @@ def run_pipeline(args):
         stage_timer.end("GCS Upload")
 
     # 타임 리포트
+    # 최종 오디오 길이 계산
+    print("\n[Audio Length] Calculating total hours after cutting...")
+    total_hours_final = calculate_total_audio_hours(cut_dir, ext=".mp3")
+    print(f"[Audio Length] Final total hours (after cutting) = {total_hours_final:.2f} hours")
+    if total_hours_after_conversion > 0:
+        ratio = (total_hours_final / total_hours_after_conversion) * 100
+        print(f" => Retained {ratio:.2f}% of originally converted audio.")
     stage_timer.report()
     print("\n[Pipeline] All stages completed successfully.")
 
