@@ -375,20 +375,28 @@ def remove_intro_segments(input_dir):
 # 6. Upload to Storage: Google Cloud Storage Upload
 ########################################
 
-def upload_to_gcs(bucket_name, local_dir, remote_prefix):
-    """Uploads files to Google Cloud Storage."""
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-
-    for root, _, files in os.walk(local_dir):
-        for file in files:
-            local_path = os.path.join(root, file)
-            relative_path = os.path.relpath(local_path, local_dir)
-            remote_path = os.path.join(remote_prefix, relative_path)
-
-            blob = bucket.blob(remote_path)
-            blob.upload_from_filename(local_path)
-            print(f"Uploaded {local_path} to gs://{bucket_name}/{remote_path}")
+def upload_to_gcs_with_gsutil(local_dir, bucket_name, remote_prefix):
+    """
+    Uses gsutil to upload files to Google Cloud Storage in parallel.
+    
+    Args:
+        local_dir (str): The local directory containing files to upload.
+        bucket_name (str): The name of the GCS bucket.
+        remote_prefix (str): The prefix path in the GCS bucket.
+    """
+    # Construct the gsutil command
+    gsutil_command = [
+        'gsutil', '-m', 'cp', '-r',
+        os.path.join(local_dir, '*'),
+        f'gs://{bucket_name}/{remote_prefix}/'
+    ]
+    
+    try:
+        # Execute the gsutil command
+        subprocess.run(gsutil_command, check=True)
+        print(f"Successfully uploaded {local_dir} to gs://{bucket_name}/{remote_prefix}/")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred during upload: {e}")
 
 
 ########################################
@@ -434,8 +442,8 @@ def run_pipeline(args):
 
     # 6. Storage Upload Stage (Optional)
     if args.gcs_bucket:
-        print("Uploading cut segments to Google Cloud Storage...")
-        upload_to_gcs(args.gcs_bucket, cut_dir, args.gcs_prefix)  # Upload from cut_dir
+        print("Uploading cut segments to Google Cloud Storage using gsutil...")
+        upload_to_gcs_with_gsutil(cut_dir, args.gcs_bucket, args.gcs_prefix)
 
     print("Pipeline completed successfully.")
 
