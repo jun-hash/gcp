@@ -17,7 +17,8 @@ import torch
 import torchaudio
 from google.cloud import storage
 import shlex
-from silero_vad import SileroVAD
+from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+
 
 # Constants for default values
 DEFAULT_BASE_DIR = "data"
@@ -40,11 +41,11 @@ DEFAULT_GCS_PREFIX = "test"
 _VAD_MODEL = None
 
 def get_vad_model():
-    """Loads the Silero VAD model using pip-installed package."""
+    """Loads the Silero VAD model using the official API."""
     global _VAD_MODEL
     if _VAD_MODEL is None:
-        _VAD_MODEL = SileroVAD()
-    return _VAD_MODE
+        _VAD_MODEL = load_silero_vad()
+    return _VAD_MODEL
 
 ########################################
 # 1. Download: File Download
@@ -201,23 +202,20 @@ def extract_speech_timestamps(
 
 def apply_vad(audio_path, sample_rate=16000, min_speech_duration=DEFAULT_MIN_SPEECH_DURATION):
     """Applies VAD to an audio file and returns speech segments."""
-    model = get_vad_model()  # Use the global model
+    model = get_vad_model()  # Load model
 
-    waveform, sr = torchaudio.load(audio_path)
+    # Read audio file
+    waveform = read_audio(audio_path, sampling_rate=sample_rate)
 
-    if sr != 16000:
-        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
-        sr = 16000
-
-    timestamps = model.get_speech_timestamps(
+    # Apply VAD
+    timestamps = get_speech_timestamps(
         waveform,
-        sampling_rate=sr,
-        threshold=0.3,
-        min_speech_duration_ms=int(min_speech_duration * 1000),
-        min_silence_duration_ms=500
+        model,
+        return_seconds=True  # Return timestamps in seconds
     )
 
-    segments = [{'start': ts["start"] / sr, 'end': ts["end"] / sr} for ts in timestamps]
+    # Convert results to dictionary format
+    segments = [{'start': ts[0], 'end': ts[1]} for ts in timestamps]
     return segments
 
 
