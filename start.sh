@@ -5,11 +5,11 @@
 set -e
 
 # 1) 시스템 업데이트 및 필수 패키지 설치
-apt-get update
-apt-get install -y python3 python3-pip ffmpeg unzip git curl
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip ffmpeg unzip git curl
 
 # 2) pip 패키지 설치 (필요한 라이브러리)
-pip3 install requests tqdm termcolor
+sudo pip3 install requests tqdm termcolor
 
 # gsutil은 기본적으로 Cloud SDK에 포함되어 있으므로 별도 설치 불필요
 
@@ -18,7 +18,7 @@ mkdir -p /home/pipeline
 cd /home/pipeline
 
 # 4) GitHub에서 파이프라인 코드 클론 (아래 URL은 예시, 실제로는 자신의 저장소 URL로 교체)
-git clone https://github.com/yourusername/libri-light-pipeline.git
+git clone https://github.com/jun-hash/gcp.git
 cd libri-light-pipeline
 
 # 5) 소규모 테스트용 Master URL 파일 생성
