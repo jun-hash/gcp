@@ -17,6 +17,7 @@ import torch
 import torchaudio
 from google.cloud import storage
 import shlex
+from silero_vad import SileroVAD
 
 # Constants for default values
 DEFAULT_BASE_DIR = "data"
@@ -32,16 +33,18 @@ DEFAULT_MIN_SPEECH_DURATION = 0.5
 DEFAULT_TARGET_LEN_SEC = 30
 DEFAULT_GCS_BUCKET = "nari-librivox-test"
 DEFAULT_GCS_PREFIX = "test"
+
+
+
 # Global variable to hold the VAD model
 _VAD_MODEL = None
-_VAD_UTILS = None
 
 def get_vad_model():
-    """Loads the Silero VAD model and utils, ensuring it's only loaded once."""
-    global _VAD_MODEL, _VAD_UTILS
+    """Loads the Silero VAD model using pip-installed package."""
+    global _VAD_MODEL
     if _VAD_MODEL is None:
-        _VAD_MODEL, _VAD_UTILS = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True,force_reload=True)
-    return _VAD_MODEL, _VAD_UTILS
+        _VAD_MODEL = SileroVAD()
+    return _VAD_MODE
 
 ########################################
 # 1. Download: File Download
@@ -198,8 +201,7 @@ def extract_speech_timestamps(
 
 def apply_vad(audio_path, sample_rate=16000, min_speech_duration=DEFAULT_MIN_SPEECH_DURATION):
     """Applies VAD to an audio file and returns speech segments."""
-    model, utils = get_vad_model()  # Use the global model
-    get_speech_timestamps = utils[0]
+    model = get_vad_model()  # Use the global model
 
     waveform, sr = torchaudio.load(audio_path)
 
@@ -207,12 +209,15 @@ def apply_vad(audio_path, sample_rate=16000, min_speech_duration=DEFAULT_MIN_SPE
         waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
         sr = 16000
 
-    timestamps = extract_speech_timestamps(waveform, sr, model, get_speech_timestamps,
-                                             threshold=0.3,
-                                             min_speech_duration_ms=int(min_speech_duration*1000),
-                                             min_silence_duration_ms=500)
+    timestamps = model.get_speech_timestamps(
+        waveform,
+        sampling_rate=sr,
+        threshold=0.3,
+        min_speech_duration_ms=int(min_speech_duration * 1000),
+        min_silence_duration_ms=500
+    )
 
-    segments = [{'start': start, 'end': end} for start, end in timestamps]
+    segments = [{'start': ts["start"] / sr, 'end': ts["end"] / sr} for ts in timestamps]
     return segments
 
 
