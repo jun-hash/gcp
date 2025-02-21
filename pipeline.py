@@ -17,13 +17,11 @@ import torch
 import torchaudio
 from google.cloud import storage
 import shlex
-from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
-
 
 # Constants for default values
 DEFAULT_BASE_DIR = "data"
 DEFAULT_LANGUAGE = "English"
-DEFAULT_API_LIMIT = 500
+DEFAULT_API_LIMIT = 200
 DEFAULT_MAX_URLS = 5
 DEFAULT_VM_INDEX = 0
 DEFAULT_NUM_VMS = 1
@@ -34,18 +32,16 @@ DEFAULT_MIN_SPEECH_DURATION = 0.5
 DEFAULT_TARGET_LEN_SEC = 30
 DEFAULT_GCS_BUCKET = "nari-librivox-test"
 DEFAULT_GCS_PREFIX = "test"
-
-
-
 # Global variable to hold the VAD model
 _VAD_MODEL = None
+_VAD_UTILS = None
 
 def get_vad_model():
-    """Loads the Silero VAD model using the official API."""
-    global _VAD_MODEL
+    """Loads the Silero VAD model and utils, ensuring it's only loaded once."""
+    global _VAD_MODEL, _VAD_UTILS
     if _VAD_MODEL is None:
-        _VAD_MODEL = load_silero_vad()
-    return _VAD_MODEL
+        _VAD_MODEL, _VAD_UTILS = torch.hub.load('snakers4/silero-vad', 'silero_vad', force_reload=True)
+    return _VAD_MODEL, _VAD_UTILS
 
 ########################################
 # 1. Download: File Download
@@ -202,20 +198,21 @@ def extract_speech_timestamps(
 
 def apply_vad(audio_path, sample_rate=16000, min_speech_duration=DEFAULT_MIN_SPEECH_DURATION):
     """Applies VAD to an audio file and returns speech segments."""
-    model = get_vad_model()  # Load model
+    model, utils = get_vad_model()  # Use the global model
+    get_speech_timestamps = utils[0]
 
-    # Read audio file
-    waveform = read_audio(audio_path, sampling_rate=sample_rate)
+    waveform, sr = torchaudio.load(audio_path)
 
-    # Apply VAD
-    timestamps = get_speech_timestamps(
-        waveform,
-        model,
-        return_seconds=True  # Return timestamps in seconds
-    )
+    if sr != 16000:
+        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+        sr = 16000
 
-    # Convert results to dictionary format
-    segments = [{'start': ts[0], 'end': ts[1]} for ts in timestamps]
+    timestamps = extract_speech_timestamps(waveform, sr, model, get_speech_timestamps,
+                                             threshold=0.3,
+                                             min_speech_duration_ms=int(min_speech_duration*1000),
+                                             min_silence_duration_ms=500)
+
+    segments = [{'start': start, 'end': end} for start, end in timestamps]
     return segments
 
 
@@ -279,11 +276,12 @@ def save_cut(seq, fname, index, extension, output_dir):
     file_name = pathlib.Path(output_dir) / fname.name / (fname.stem + f"_{index:04}{extension}")
     file_name.parent.mkdir(exist_ok=True, parents=True)
     sf.write(file_name, output, samplerate=44100)
+    # print(f"Saved cut segment: {file_name}") # Removed for brevity (tqdm handles progress)
 
-def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, out_extension=".mp3"):
-    """Cuts an audio sequence based on VAD, ensuring segment length is between min_len_sec and max_len_sec."""
+
+def cut_sequence(audio_path, vad, output_dir, target_len_sec, out_extension, min_len_sec=15):
+    """Cuts an audio sequence based on VAD with a minimum length."""
     data, samplerate = sf.read(audio_path)
-
     if len(data.shape) != 1:
         raise ValueError(f"{audio_path} is not mono audio")
 
@@ -296,26 +294,26 @@ def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, ou
 
     for segment in vad:
         start, end = segment['start'], segment['end']
-        start_idx, end_idx = int(start * samplerate), int(end * samplerate)
+        start_idx = int(start * samplerate)
+        end_idx = int(end * samplerate)
         slice_audio = data[start_idx:end_idx]
 
-        # ✅ segment가 max_len_sec을 초과하면 저장 후 새로운 segment 시작
-        if length_accumulated + (end - start) > max_len_sec:
-            save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
-            segment_index += 1
+        if (length_accumulated + (end - start)) > target_len_sec and length_accumulated >= min_len_sec:
+            audio_fname = pathlib.Path(audio_path).with_suffix("")
+            save_cut(to_stitch, audio_fname, segment_index, out_extension, output_dir)
             to_stitch = []
+            segment_index += 1
             length_accumulated = 0.0
 
         to_stitch.append(slice_audio)
         length_accumulated += (end - start)
 
-    # ✅ 마지막 segment 처리 (15초 이상이면 저장, 15초 미만이면 버림)
-    if to_stitch and length_accumulated >= min_len_sec:
-        save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
-    else:
-        print(f"Last segment too short ({length_accumulated:.2f}s), discarding.")
+    if to_stitch:
+        audio_fname = pathlib.Path(audio_path).with_suffix("")
+        save_cut(to_stitch, audio_fname, segment_index, out_extension, output_dir)
 
-def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, out_extension=DEFAULT_FORMAT, test_sample=None, n_processes=DEFAULT_N_PROCESSES):
+
+def process_cut(vad_dir, audio_dir, output_dir, target_len_sec=DEFAULT_TARGET_LEN_SEC, out_extension=DEFAULT_FORMAT, test_sample=None, n_processes=DEFAULT_N_PROCESSES):
     """Cuts audio files based on VAD results, using multiprocessing."""
     json_files = []
     for root, _, files in os.walk(vad_dir):
@@ -331,16 +329,14 @@ def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, 
 
     with multiprocessing.Pool(processes=n_processes) as pool:
         with tqdm.tqdm(total=len(json_files), desc="Cutting Audio") as pbar:
-            for _ in pool.imap_unordered(
-                _process_cut_single,
-                [(json_file, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension) for json_file in json_files]
-            ):
+            for _ in pool.imap_unordered(_process_cut_single, [(json_file, vad_dir, audio_dir, output_dir, target_len_sec, out_extension) for json_file in json_files]):
                 pbar.update()
     print("Cutting completed.")
 
+
 def _process_cut_single(args):
     """Processes a single audio file for cutting (for multiprocessing)."""
-    json_file, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension = args
+    json_file, vad_dir, audio_dir, output_dir, target_len_sec, out_extension = args
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
@@ -354,10 +350,12 @@ def _process_cut_single(args):
             return
 
         out_subdir = os.path.join(output_dir, os.path.dirname(rel_path))
-        cut_sequence(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
+        # os.makedirs(out_subdir, exist_ok=True) # Moved to save_cut
+        cut_sequence(audio_path, vad, out_subdir, target_len_sec, out_extension)
 
     except Exception as e:
         print(f"Error cutting {audio_path}: {e}")
+
 
 ########################################
 # 5.  Remove Intro Segments (No SNR Filtering)
@@ -430,7 +428,7 @@ def run_pipeline(args):
 
     # 4. Cutting Stage
     print("Cutting audio segments based on VAD results...")
-    process_cut(vad_dir, converted_dir, cut_dir, out_extension=".mp3", test_sample=args.test_sample, n_processes=args.n_processes)
+    process_cut(vad_dir, converted_dir, cut_dir, target_len_sec=args.target_len_sec, out_extension=".mp3", test_sample=args.test_sample, n_processes=args.n_processes)
 
 
     # 5. Remove intro segments
