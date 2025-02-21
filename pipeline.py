@@ -276,12 +276,11 @@ def save_cut(seq, fname, index, extension, output_dir):
     file_name = pathlib.Path(output_dir) / fname.name / (fname.stem + f"_{index:04}{extension}")
     file_name.parent.mkdir(exist_ok=True, parents=True)
     sf.write(file_name, output, samplerate=44100)
-    # print(f"Saved cut segment: {file_name}") # Removed for brevity (tqdm handles progress)
 
-
-def cut_sequence(audio_path, vad, output_dir, target_len_sec, out_extension, min_len_sec=15):
-    """Cuts an audio sequence based on VAD with a minimum length."""
+def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, out_extension=".mp3"):
+    """Cuts an audio sequence based on VAD, ensuring segment length is between min_len_sec and max_len_sec."""
     data, samplerate = sf.read(audio_path)
+
     if len(data.shape) != 1:
         raise ValueError(f"{audio_path} is not mono audio")
 
@@ -294,26 +293,26 @@ def cut_sequence(audio_path, vad, output_dir, target_len_sec, out_extension, min
 
     for segment in vad:
         start, end = segment['start'], segment['end']
-        start_idx = int(start * samplerate)
-        end_idx = int(end * samplerate)
+        start_idx, end_idx = int(start * samplerate), int(end * samplerate)
         slice_audio = data[start_idx:end_idx]
 
-        if (length_accumulated + (end - start)) > target_len_sec and length_accumulated >= min_len_sec:
-            audio_fname = pathlib.Path(audio_path).with_suffix("")
-            save_cut(to_stitch, audio_fname, segment_index, out_extension, output_dir)
-            to_stitch = []
+        # ✅ segment가 max_len_sec을 초과하면 저장 후 새로운 segment 시작
+        if length_accumulated + (end - start) > max_len_sec:
+            save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
             segment_index += 1
+            to_stitch = []
             length_accumulated = 0.0
 
         to_stitch.append(slice_audio)
         length_accumulated += (end - start)
 
-    if to_stitch:
-        audio_fname = pathlib.Path(audio_path).with_suffix("")
-        save_cut(to_stitch, audio_fname, segment_index, out_extension, output_dir)
+    # ✅ 마지막 segment 처리 (15초 이상이면 저장, 15초 미만이면 버림)
+    if to_stitch and length_accumulated >= min_len_sec:
+        save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
+    else:
+        print(f"Last segment too short ({length_accumulated:.2f}s), discarding.")
 
-
-def process_cut(vad_dir, audio_dir, output_dir, target_len_sec=DEFAULT_TARGET_LEN_SEC, out_extension=DEFAULT_FORMAT, test_sample=None, n_processes=DEFAULT_N_PROCESSES):
+def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, out_extension=DEFAULT_FORMAT, test_sample=None, n_processes=DEFAULT_N_PROCESSES):
     """Cuts audio files based on VAD results, using multiprocessing."""
     json_files = []
     for root, _, files in os.walk(vad_dir):
@@ -329,14 +328,16 @@ def process_cut(vad_dir, audio_dir, output_dir, target_len_sec=DEFAULT_TARGET_LE
 
     with multiprocessing.Pool(processes=n_processes) as pool:
         with tqdm.tqdm(total=len(json_files), desc="Cutting Audio") as pbar:
-            for _ in pool.imap_unordered(_process_cut_single, [(json_file, vad_dir, audio_dir, output_dir, target_len_sec, out_extension) for json_file in json_files]):
+            for _ in pool.imap_unordered(
+                _process_cut_single,
+                [(json_file, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension) for json_file in json_files]
+            ):
                 pbar.update()
     print("Cutting completed.")
 
-
 def _process_cut_single(args):
     """Processes a single audio file for cutting (for multiprocessing)."""
-    json_file, vad_dir, audio_dir, output_dir, target_len_sec, out_extension = args
+    json_file, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension = args
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
@@ -350,8 +351,7 @@ def _process_cut_single(args):
             return
 
         out_subdir = os.path.join(output_dir, os.path.dirname(rel_path))
-        # os.makedirs(out_subdir, exist_ok=True) # Moved to save_cut
-        cut_sequence(audio_path, vad, out_subdir, target_len_sec, out_extension)
+        cut_sequence(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
 
     except Exception as e:
         print(f"Error cutting {audio_path}: {e}")
@@ -428,8 +428,7 @@ def run_pipeline(args):
 
     # 4. Cutting Stage
     print("Cutting audio segments based on VAD results...")
-    process_cut(vad_dir, converted_dir, cut_dir, target_len_sec=args.target_len_sec, out_extension=".mp3", test_sample=args.test_sample, n_processes=args.n_processes)
-
+    process_cut(vad_dir, converted_dir, cut_dir, out_extension=".mp3", test_sample=args.test_sample, n_processes=args.n_processes)
 
     # 5. Remove intro segments
     print("Removing intro segments...")
