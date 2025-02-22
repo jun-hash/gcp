@@ -186,8 +186,8 @@ def unzip_and_convert(in_dir, out_dir, sample_rate=DEFAULT_SAMPLE_RATE, n_proces
     zip_files = [f for f in os.listdir(in_dir) if f.lower().endswith('.zip')]
     print(f"[INFO] Found {len(zip_files)} zip files in {in_dir}")
 
-    # 임시 디렉토리는 RAM 디스크나 빠른 SSD에 생성
-    temp_extract_dir = "/dev/shm/_temp_extracted" if os.path.exists("/dev/shm") else os.path.join(out_dir, "_temp_extracted")
+    # 임시 디렉토리를 일반 디스크에 생성
+    temp_extract_dir = os.path.join(out_dir, "_temp_extracted")
     os.makedirs(temp_extract_dir, exist_ok=True)
 
     # 1. 모든 ZIP 파일을 병렬로 추출
@@ -234,7 +234,6 @@ def unzip_and_convert(in_dir, out_dir, sample_rate=DEFAULT_SAMPLE_RATE, n_proces
             os.remove(zip_path[0])  # 원본 ZIP 파일 삭제
         except Exception as e:
             print(f"Error removing {zip_path[0]}: {e}")
-    shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
 def extract_zip(zip_path, temp_dir):
     """ZIP 파일 추출 헬퍼 함수"""
