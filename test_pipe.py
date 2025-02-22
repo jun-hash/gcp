@@ -146,33 +146,10 @@ def download_urls(urls_file, output_dir, test_sample=None, n_threads=16):
 # -------------------------------------------------
 # Unzip & Convert (ffmpeg)
 # -------------------------------------------------
-def parallel_unzip_function(zip_file, in_dir, temp_dir):
-    """
-    주어진 ZIP 파일을 병렬로 해제합니다.
-    """
-    zip_path = os.path.join(in_dir, zip_file)
-    out_dir = os.path.join(temp_dir, os.path.splitext(zip_file)[0])
-    os.makedirs(out_dir, exist_ok=True)
-
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(out_dir)
-    except Exception as e:
-        print(f"Error extracting {zip_path}: {e}")
-        shutil.rmtree(out_dir, ignore_errors=True)
-        return None
-    return out_dir
-
 def convert_audio_file(task):
-    """
-    주어진 파일을 MP3로 변환합니다. 필요 시.
-    checking하는 부분 없애줘. 전부다 22khz mono mp3일거야
-    """
-    in_file, out_base_dir, sample_rate = task
-    filename = os.path.basename(in_file)
-    name_wo_ext = os.path.splitext(filename)[0]
-    out_file = os.path.join(out_base_dir, name_wo_ext + ".mp3")
-
+    """오디오 파일을 MP3로 변환 (22kHz -> 44.1kHz)"""
+    in_file, out_file, sample_rate = task
+    
     if os.path.exists(out_file):
         return out_file
 
@@ -180,9 +157,10 @@ def convert_audio_file(task):
         "ffmpeg",
         "-y",
         "-i", in_file,
-        "-ac", "1",  # 모노로 설정
-        "-ar", str(sample_rate),  # 목표 샘플 레이트
-        "-f", "mp3",  # MP3 형식으로 변환
+        "-ac", "1",                    # 모노
+        "-ar", str(sample_rate),       # 44.1kHz
+        "-acodec", "libmp3lame",       # MP3 인코더
+        "-b:a", "64k",                 # 고정 비트레이트 64kbps
         out_file
     ]
     try:
@@ -192,62 +170,71 @@ def convert_audio_file(task):
 
     return out_file
 
-def parallel_convert_audio(temp_dir, out_dir, sample_rate=DEFAULT_SAMPLE_RATE, n_processes=DEFAULT_N_PROCESSES):
-    """
-    temp_extracted 디렉토리 내의 모든 오디오 파일을 MP3로 변환합니다.
-    병렬 처리.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-    audio_files = []
-
-    # 디렉토리 내 오디오 파일 목록 수집
-    for root, dirs, files in os.walk(temp_dir):
-        for f in files:
-            if f.lower().endswith(('.mp3', '.wav', '.ogg', '.flac', '.m4a')):
-                full_path = os.path.join(root, f)
-                audio_files.append(full_path)
-
-    # 변환할 파일에 대한 작업 목록 생성
-    tasks = [(f, out_dir, sample_rate) for f in audio_files]
-
-    results = []
-
-    # 멀티프로세싱을 활용하여 병렬 변환 수행
-    with multiprocessing.Pool(processes=n_processes) as pool:
-        for _ in tqdm.tqdm(pool.imap_unordered(convert_audio_file, tasks), total=len(tasks), desc="Converting", ncols=80):
-            results.append(_)
-
-    return results
-
 def unzip_and_convert(in_dir, out_dir, sample_rate=DEFAULT_SAMPLE_RATE, n_processes=DEFAULT_N_PROCESSES):
-    """
-    1) ZIP 파일을 풀고, 2) 오디오 파일을 변환합니다.
-    병렬 처리.
-    """
+    """ZIP 파일들을 병렬로 처리"""
     os.makedirs(out_dir, exist_ok=True)
     zip_files = [f for f in os.listdir(in_dir) if f.lower().endswith('.zip')]
     print(f"[INFO] Found {len(zip_files)} zip files in {in_dir}")
 
-    temp_extract_dir = os.path.join(out_dir, "_temp_extracted")
+    # 임시 디렉토리는 RAM 디스크나 빠른 SSD에 생성
+    temp_extract_dir = "/dev/shm/_temp_extracted" if os.path.exists("/dev/shm") else os.path.join(out_dir, "_temp_extracted")
     os.makedirs(temp_extract_dir, exist_ok=True)
 
-    # 1) 병렬로 ZIP 파일을 해제
+    # 1. 모든 ZIP 파일을 병렬로 추출
+    extract_tasks = []
+    for zip_file in zip_files:
+        zip_path = os.path.join(in_dir, zip_file)
+        temp_dir = os.path.join(temp_extract_dir, os.path.splitext(zip_file)[0])
+        os.makedirs(temp_dir, exist_ok=True)
+        extract_tasks.append((zip_path, temp_dir))
+
+    with ThreadPoolExecutor(max_workers=min(8, n_processes)) as executor:
+        list(tqdm.tqdm(
+            executor.map(lambda x: extract_zip(*x), extract_tasks),
+            total=len(extract_tasks),
+            desc="Extracting ZIPs",
+            ncols=80
+        ))
+
+    # 2. 모든 오디오 파일 목록 수집
+    convert_tasks = []
+    for root, _, files in os.walk(temp_extract_dir):
+        for f in files:
+            if f.lower().endswith(('.mp3', '.wav', '.ogg', '.flac')):
+                in_file = os.path.join(root, f)
+                rel_path = os.path.relpath(os.path.dirname(in_file), temp_extract_dir)
+                out_subdir = os.path.join(out_dir, rel_path)
+                os.makedirs(out_subdir, exist_ok=True)
+                out_file = os.path.join(out_subdir, os.path.splitext(f)[0] + ".mp3")
+                convert_tasks.append((in_file, out_file, sample_rate))
+
+    # 3. 모든 오디오 파일을 병렬 변환
+    print(f"[INFO] Converting {len(convert_tasks)} audio files...")
     with multiprocessing.Pool(processes=n_processes) as pool:
-        # imap_unordered 대신 apply_async 사용하여 병렬 처리
-        results = [pool.apply_async(parallel_unzip_function, (zip_file, in_dir, temp_extract_dir)) for zip_file in zip_files]
+        list(tqdm.tqdm(
+            pool.imap_unordered(convert_audio_file, convert_tasks),
+            total=len(convert_tasks),
+            desc="Converting audio",
+            ncols=80
+        ))
 
-        # 완료된 작업을 리스트에 모은다
-        temp_dirs = [result.get() for result in tqdm.tqdm(results, total=len(zip_files), desc="Unzipping", ncols=80)]
-
-    # 2) 병렬로 오디오 파일 변환
-    for temp_dir in temp_dirs:
-        if temp_dir:
-            parallel_convert_audio(temp_dir, out_dir, sample_rate=sample_rate, n_processes=n_processes)
-
-    # 3) 임시 디렉토리 제거
+    # 4. 정리
+    for zip_path in extract_tasks:
+        try:
+            os.remove(zip_path[0])  # 원본 ZIP 파일 삭제
+        except Exception as e:
+            print(f"Error removing {zip_path[0]}: {e}")
     shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
-    print("[INFO] Unzip and conversion completed.")
+def extract_zip(zip_path, temp_dir):
+    """ZIP 파일 추출 헬퍼 함수"""
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(temp_dir)
+        return True
+    except Exception as e:
+        print(f"Error extracting {zip_path}: {e}")
+        return False
 
 
 # -------------------------------------------------
@@ -491,47 +478,42 @@ def calculate_total_audio_hours(dir_path, ext=".mp3", max_workers=8):
 # -------------------------------------------------
 def run_pipeline(args):
     stage_timer = StageTimer()
+    base_dir = pathlib.Path(args.base_dir)
 
-    base_dir = args.base_dir
-    downloads_dir = os.path.join(base_dir, "downloads")
-    converted_dir = os.path.join(base_dir, "converted")
-    vad_dir = os.path.join(base_dir, "vad_results")
-    cut_dir = os.path.join(base_dir, "cut_segments")
+    # 디렉토리 구조
+    download_dir = base_dir / "downloads"  # ZIP 파일들
+    converted_dir = base_dir / "converted"  # MP3 변환 파일들
+    vad_dir = base_dir / "vad"  # VAD JSON 파일들
+    cut_dir = base_dir / "cut"  # 최종 컷팅된 파일들
 
-    # 폴더 생성
-    for d in [downloads_dir, converted_dir, vad_dir, cut_dir]:
-        os.makedirs(d, exist_ok=True)
+    # 디렉토리 생성
+    for d in [download_dir, converted_dir, vad_dir, cut_dir]:
+        d.mkdir(parents=True, exist_ok=True)
 
     # 1. Download
     stage_timer.start("Download")
     download_urls(
-        urls_file=os.path.join(base_dir, "urls.txt"),
-        output_dir=downloads_dir,
+        urls_file=f"urls_{args.language}.txt",
+        output_dir=download_dir,
         test_sample=args.test_sample,
-        n_threads=min(16, multiprocessing.cpu_count())  # 적절히 조절
+        n_threads=16
     )
     stage_timer.end("Download")
 
-    # (선택) 다운로드된 MP3의 총 길이 측정
-    #  - 지금 단계에서는 ZIP만 있을 수도 있으므로, ZIP이 아니라 MP3를 직접 받는 케이스만 유효.
-    #  - ZIP 파일이 대부분이면, "unzip_and_convert" 후에 계산해야 함.
-    #  - 만약 "직접 mp3"를 다운로드받는 구조라면 이 시점에서 시간 계산이 가능.
-    # 여기서는 'converted_dir'을 만들기 전, ZIP을 푸는 단계 이후에 실제 MP3 길이를 측정하는 것을 예시로 삼겠습니다.
-
-    # 2. Unzip + Convert
-    stage_timer.start("UnzipConvert")
+    # 2. Unzip & Convert
+    stage_timer.start("Convert")
     unzip_and_convert(
-        in_dir=downloads_dir,
+        in_dir=download_dir,
         out_dir=converted_dir,
         sample_rate=args.sample_rate,
         n_processes=args.n_processes
     )
-    stage_timer.end("UnzipConvert")
+    # ZIP 파일 삭제 (이미 unzip_and_convert 함수 내에서 처리됨)
+    stage_timer.end("Convert")
 
-    # ---> "다운로드/변환 완료 후" 오디오 총 길이 계산
-    print("\n[Audio Length] Calculating total hours after conversion...")
+    # 변환된 오디오 총 길이 계산
     total_hours_after_conversion = calculate_total_audio_hours(converted_dir, ext=".mp3")
-    print(f"[Audio Length] Total hours (after conversion) = {total_hours_after_conversion:.2f} hours")
+    print(f"\n[Audio Length] Total hours after conversion = {total_hours_after_conversion:.2f} hours")
 
     # 3. VAD
     stage_timer.start("VAD")
@@ -561,8 +543,6 @@ def run_pipeline(args):
     stage_timer.start("RemoveIntro")
     remove_intro_segments(cut_dir)
     stage_timer.end("RemoveIntro")
-
-
 
     # 6. (옵션) Storage Upload
     if args.gcs_bucket:
@@ -609,6 +589,7 @@ def parse_args():
     parser.add_argument("--gcs_prefix", type=str, default=DEFAULT_GCS_PREFIX)
     parser.add_argument("--credentials", type=str, help="Path to Google Cloud service account key file (optional).")
     parser.add_argument("--pipeline", action="store_true", help="Run the entire pipeline.")
+    parser.add_argument("--cleanup_after_upload", action="store_true", help="Remove local files after GCS upload.")
 
     args = parser.parse_args()
     if args.credentials:
