@@ -599,13 +599,28 @@ def should_run_stage(stage, start_stage, end_stage):
 def parse_args():
     parser = argparse.ArgumentParser(description="Librivox End-to-End Pipeline")
     
-    # 기존 인자들...
+    # 기본 인자들
+    parser.add_argument("--base_dir", type=str, default=DEFAULT_BASE_DIR)
+    parser.add_argument("--language", type=str, default=DEFAULT_LANGUAGE)
+    parser.add_argument("--api_limit", type=int, default=DEFAULT_API_LIMIT)
+    parser.add_argument("--max_urls", type=int, default=DEFAULT_MAX_URLS)
+    parser.add_argument("--test_sample", type=int, default=None)
+    parser.add_argument("--format", type=str, default=DEFAULT_FORMAT)
+    parser.add_argument("--sample_rate", type=int, default=DEFAULT_SAMPLE_RATE)
+    parser.add_argument("--n_processes", type=int, default=DEFAULT_N_PROCESSES)
+    parser.add_argument("--min_speech_duration", type=float, default=DEFAULT_MIN_SPEECH_DURATION)
+    parser.add_argument("--target_len_sec", type=int, default=DEFAULT_TARGET_LEN_SEC)
+    parser.add_argument("--gcs_bucket", type=str, default=None)
+    parser.add_argument("--gcs_prefix", type=str, default=DEFAULT_GCS_PREFIX)
+    parser.add_argument("--credentials", type=str, help="Path to Google Cloud service account key file (optional).")
     
-    # 파이프라인 단계 제어 인자 추가
+    # 파이프라인 제어 인자들
     parser.add_argument("--start_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
                        default="download", help="Start from this pipeline stage")
     parser.add_argument("--end_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
                        default="upload", help="End at this pipeline stage")
+    parser.add_argument("--cleanup_after_upload", action="store_true", 
+                       help="Remove local files after GCS upload")
     
     args = parser.parse_args()
     
@@ -617,10 +632,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.pipeline:
-        run_pipeline(args)
-    else:
-        print("Specify the --pipeline option to run the entire pipeline.")
+    run_pipeline(args)
 
 if __name__ == "__main__":
     main()
