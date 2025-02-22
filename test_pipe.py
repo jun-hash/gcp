@@ -507,8 +507,6 @@ def run_pipeline(args):
     download_urls(
         urls_file=os.path.join(base_dir, "urls.txt"),
         output_dir=downloads_dir,
-        vm_index=args.vm_index,
-        num_vms=args.num_vms,
         test_sample=args.test_sample,
         n_threads=min(16, multiprocessing.cpu_count())  # 적절히 조절
     )
