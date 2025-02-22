@@ -39,6 +39,16 @@ DEFAULT_TARGET_LEN_SEC = 30
 DEFAULT_GCS_BUCKET = "nari-librivox-test"
 DEFAULT_GCS_PREFIX = "test"
 
+# 파이프라인 단계 정의
+PIPELINE_STAGES = {
+    "download": "Download audio files",
+    "convert": "Convert to MP3",
+    "vad": "Voice Activity Detection",
+    "cut": "Cut segments",
+    "intro": "Remove intro segments",
+    "upload": "Upload to GCS"
+}
+
 _VAD_MODEL = None
 _VAD_UTILS = None
 
@@ -481,71 +491,78 @@ def run_pipeline(args):
     base_dir = pathlib.Path(args.base_dir)
 
     # 디렉토리 구조
-    download_dir = base_dir / "downloads"  # ZIP 파일들
-    converted_dir = base_dir / "converted"  # MP3 변환 파일들
-    vad_dir = base_dir / "vad"  # VAD JSON 파일들
-    cut_dir = base_dir / "cut"  # 최종 컷팅된 파일들
+    download_dir = base_dir / "downloads"
+    converted_dir = base_dir / "converted"
+    vad_dir = base_dir / "vad"
+    cut_dir = base_dir / "cut"
 
-    # 디렉토리 생성
-    for d in [download_dir, converted_dir, vad_dir, cut_dir]:
+    # 시작 단계부터 모든 디렉토리 생성
+    start_stage_idx = list(PIPELINE_STAGES.keys()).index(args.start_stage)
+    dirs = [download_dir, converted_dir, vad_dir, cut_dir]
+    for d in dirs[start_stage_idx:]:
         d.mkdir(parents=True, exist_ok=True)
 
     # 1. Download
-    stage_timer.start("Download")
-    download_urls(
-        urls_file=f"data/urls.txt",
-        output_dir=download_dir,
-        test_sample=args.test_sample,
-        n_threads=16
-    )
-    stage_timer.end("Download")
+    if should_run_stage("download", args.start_stage, args.end_stage):
+        stage_timer.start("Download")
+        download_urls(
+            urls_file=f"urls_{args.language}.txt",
+            output_dir=download_dir,
+            test_sample=args.test_sample,
+            n_threads=16
+        )
+        stage_timer.end("Download")
 
-    # 2. Unzip & Convert
-    stage_timer.start("Convert")
-    unzip_and_convert(
-        in_dir=download_dir,
-        out_dir=converted_dir,
-        sample_rate=args.sample_rate,
-        n_processes=args.n_processes
-    )
-    # ZIP 파일 삭제 (이미 unzip_and_convert 함수 내에서 처리됨)
-    stage_timer.end("Convert")
+    # 2. Convert
+    if should_run_stage("convert", args.start_stage, args.end_stage):
+        stage_timer.start("Convert")
+        unzip_and_convert(
+            in_dir=download_dir,
+            out_dir=converted_dir,
+            sample_rate=args.sample_rate,
+            n_processes=args.n_processes
+        )
+        stage_timer.end("Convert")
 
-    # 변환된 오디오 총 길이 계산
-    total_hours_after_conversion = calculate_total_audio_hours(converted_dir, ext=".mp3")
-    print(f"\n[Audio Length] Total hours after conversion = {total_hours_after_conversion:.2f} hours")
+    # 변환된 오디오 총 길이 계산 (convert 또는 이후 단계부터 시작할 때)
+    if should_run_stage("convert", args.start_stage, args.end_stage) or args.start_stage in ["vad", "cut", "intro", "upload"]:
+        total_hours_after_conversion = calculate_total_audio_hours(converted_dir, ext=".mp3")
+        print(f"\n[Audio Length] Total hours after conversion = {total_hours_after_conversion:.2f} hours")
 
     # 3. VAD
-    stage_timer.start("VAD")
-    process_vad(
-        input_dir=converted_dir,
-        output_dir=vad_dir,
-        sample_rate=16000,
-        min_speech_duration=args.min_speech_duration,
-        test_sample=args.test_sample,
-        n_processes=args.n_processes
-    )
-    stage_timer.end("VAD")
+    if should_run_stage("vad", args.start_stage, args.end_stage):
+        stage_timer.start("VAD")
+        process_vad(
+            input_dir=converted_dir,
+            output_dir=vad_dir,
+            sample_rate=16000,
+            min_speech_duration=args.min_speech_duration,
+            test_sample=args.test_sample,
+            n_processes=args.n_processes
+        )
+        stage_timer.end("VAD")
 
     # 4. Cutting
-    stage_timer.start("Cut")
-    process_cut(
-        vad_dir=vad_dir,
-        audio_dir=converted_dir,
-        output_dir=cut_dir,
-        out_extension=".mp3",
-        test_sample=args.test_sample,
-        n_processes=args.n_processes
-    )
-    stage_timer.end("Cut")
+    if should_run_stage("cut", args.start_stage, args.end_stage):
+        stage_timer.start("Cut")
+        process_cut(
+            vad_dir=vad_dir,
+            audio_dir=converted_dir,
+            output_dir=cut_dir,
+            out_extension=".mp3",
+            test_sample=args.test_sample,
+            n_processes=args.n_processes
+        )
+        stage_timer.end("Cut")
 
-    # 5. Remove Intro Segments
-    stage_timer.start("RemoveIntro")
-    remove_intro_segments(cut_dir)
-    stage_timer.end("RemoveIntro")
+    # 5. Remove Intro
+    if should_run_stage("intro", args.start_stage, args.end_stage):
+        stage_timer.start("RemoveIntro")
+        remove_intro_segments(cut_dir)
+        stage_timer.end("RemoveIntro")
 
-    # 6. (옵션) Storage Upload
-    if args.gcs_bucket:
+    # 6. Upload
+    if should_run_stage("upload", args.start_stage, args.end_stage) and args.gcs_bucket:
         stage_timer.start("GCS Upload")
         print("\n[Upload] Uploading cut segments to GCS...")
         upload_to_gcs_with_gsutil(
@@ -553,48 +570,49 @@ def run_pipeline(args):
             bucket_name=args.gcs_bucket,
             remote_prefix=args.gcs_prefix
         )
+        if args.cleanup_after_upload:
+            print("\n[Cleanup] Removing local cut files after GCS upload...")
+            shutil.rmtree(cut_dir, ignore_errors=True)
+            cut_dir.mkdir(exist_ok=True)
         stage_timer.end("GCS Upload")
 
-    # 타임 리포트
-    # 최종 오디오 길이 계산
-    print("\n[Audio Length] Calculating total hours after cutting...")
-    total_hours_final = calculate_total_audio_hours(cut_dir, ext=".mp3")
-    print(f"[Audio Length] Final total hours (after cutting) = {total_hours_final:.2f} hours")
-    if total_hours_after_conversion > 0:
-        ratio = (total_hours_final / total_hours_after_conversion) * 100
-        print(f" => Retained {ratio:.2f}% of originally converted audio.")
+    # 최종 결과 출력
+    if args.end_stage in ["cut", "intro", "upload"]:
+        print("\n[Audio Length] Calculating total hours after cutting...")
+        total_hours_final = calculate_total_audio_hours(cut_dir, ext=".mp3")
+        print(f"[Audio Length] Final total hours (after cutting) = {total_hours_final:.2f} hours")
+        if total_hours_after_conversion > 0:
+            ratio = (total_hours_final / total_hours_after_conversion) * 100
+            print(f" => Retained {ratio:.2f}% of originally converted audio.")
+
     stage_timer.report()
-    print("\n[Pipeline] All stages completed successfully.")
+    print(f"\n[Pipeline] Completed stages from {args.start_stage} to {args.end_stage} successfully.")
 
+def should_run_stage(stage, start_stage, end_stage):
+    """특정 단계를 실행해야 하는지 확인"""
+    stages = list(PIPELINE_STAGES.keys())
+    stage_idx = stages.index(stage)
+    start_idx = stages.index(start_stage)
+    end_idx = stages.index(end_stage)
+    return start_idx <= stage_idx <= end_idx
 
-# -------------------------------------------------
-# CLI 인자 파싱
-# -------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(description="Librivox End-to-End Pipeline")
-
-    parser.add_argument("--base_dir", type=str, default=DEFAULT_BASE_DIR)
-    parser.add_argument("--language", type=str, default=DEFAULT_LANGUAGE)
-    parser.add_argument("--api_limit", type=int, default=DEFAULT_API_LIMIT)
-    parser.add_argument("--max_urls", type=int, default=DEFAULT_MAX_URLS)
-    parser.add_argument("--vm_index", type=int, default=DEFAULT_VM_INDEX)
-    parser.add_argument("--num_vms", type=int, default=DEFAULT_NUM_VMS)
-    parser.add_argument("--test_sample", type=int, default=None)
-    parser.add_argument("--format", type=str, default=DEFAULT_FORMAT)
-    parser.add_argument("--sample_rate", type=int, default=DEFAULT_SAMPLE_RATE)
-    parser.add_argument("--n_processes", type=int, default=DEFAULT_N_PROCESSES)
-    parser.add_argument("--min_speech_duration", type=float, default=DEFAULT_MIN_SPEECH_DURATION)
-    parser.add_argument("--target_len_sec", type=int, default=DEFAULT_TARGET_LEN_SEC)
-    parser.add_argument("--gcs_bucket", type=str, default=None)
-    parser.add_argument("--gcs_prefix", type=str, default=DEFAULT_GCS_PREFIX)
-    parser.add_argument("--credentials", type=str, help="Path to Google Cloud service account key file (optional).")
-    parser.add_argument("--pipeline", action="store_true", help="Run the entire pipeline.")
-    parser.add_argument("--cleanup_after_upload", action="store_true", help="Remove local files after GCS upload.")
-
+    
+    # 기존 인자들...
+    
+    # 파이프라인 단계 제어 인자 추가
+    parser.add_argument("--start_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
+                       default="download", help="Start from this pipeline stage")
+    parser.add_argument("--end_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
+                       default="upload", help="End at this pipeline stage")
+    
     args = parser.parse_args()
-    if args.credentials:
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = args.credentials
-
+    
+    # 시작/종료 단계 유효성 검사
+    if list(PIPELINE_STAGES.keys()).index(args.start_stage) > list(PIPELINE_STAGES.keys()).index(args.end_stage):
+        parser.error("start_stage cannot come after end_stage")
+    
     return args
 
 def main():
