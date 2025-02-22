@@ -493,7 +493,7 @@ def run_pipeline(args):
     # 1. Download
     stage_timer.start("Download")
     download_urls(
-        urls_file=f"urls_{args.language}.txt",
+        urls_file=f"urls.txt",
         output_dir=download_dir,
         test_sample=args.test_sample,
         n_threads=16
