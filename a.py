@@ -304,84 +304,55 @@ def process_vad(
 # -------------------------------------------------
 # Cutting (FFmpeg-based)
 # -------------------------------------------------
-def unify_vad_segments(vad_list, min_len=15.0, max_len=30.0, eps=1e-6):
-    """
-    VAD로 나온 구간(초 단위 start/end)을 합쳐서
-    하나의 구간이 최대 max_len(기본 30초)을 넘지 않도록 분할/병합하는 함수.
-    
-    - vad_list: [{"start": float, "end": float}, ...] 형태의 리스트
-    - min_len: 최소 길이(이보다 짧으면 최종 구간으로 채택 X)
-    - max_len: 최대 길이(이보다 길면 여러 조각으로 쪼갬)
-    - eps: float 비교용 작은 값
-    
-    반환값: [(start_sec, end_sec), (start_sec, end_sec), ...] 형태의 리스트
-    """
+def unify_vad_segments(vad_list, min_len=15.0, max_len=30.0):
+    """Unifies VAD segments into min_len~max_len chunks."""
     final_segments = []
-    current_chunk = []  # 현재 모으고 있는 segment들의 리스트 (start, end) 튜플들
+    current_chunk = []
+    current_length = 0.0
 
     def flush_chunk():
-        """current_chunk를 final_segments에 반영(필요시 분할)하고 비움"""
-        nonlocal current_chunk
-        if not current_chunk:
-            return
-
-        seg_start = current_chunk[0][0]
-        seg_end   = current_chunk[-1][1]
-        length = seg_end - seg_start
-
-        # 혹시 청크가 max_len을 초과한다면, while문으로 쪼개기
-        while length > max_len + eps:
-            cut_point = seg_start + max_len
-            final_segments.append((seg_start, cut_point))
-            seg_start = cut_point
+        if current_chunk:
+            seg_start = current_chunk[0][0]
+            seg_end = current_chunk[-1][1]
             length = seg_end - seg_start
-
-        # 남은 조각이 min_len 이상이면 final_segments에 추가
-        if (seg_end - seg_start) >= min_len - eps:
-            final_segments.append((seg_start, seg_end))
-
-        current_chunk = []
+            if length >= min_len:
+                final_segments.append((seg_start, seg_end))
+        return []
 
     for seg in vad_list:
         start = seg["start"]
-        end   = seg["end"]
+        end = seg["end"]
         seg_len = end - start
 
-        # 1) VAD segment 자체가 max_len보다 클 때 => 통째로 쪼갠 뒤, current_chunk에 합치지 않음
-        if seg_len > max_len + eps:
-            # 현재까지 모은 청크를 먼저 flush
-            flush_chunk()
-
-            # seg를 여러 조각으로 분할
+        # Split long segments into max_len pieces
+        if seg_len > max_len:
+            current_chunk = flush_chunk()
             t = start
-            while t < end - eps:
+            while t < end:
                 t_next = min(t + max_len, end)
                 piece_len = t_next - t
-                if piece_len >= min_len - eps:
+                if piece_len >= min_len:
                     final_segments.append((t, t_next))
                 t = t_next
             continue
 
-        # 2) 현재 청크에 seg를 더했을 때 max_len을 넘는지 검사
-        if current_chunk:
-            chunk_start = current_chunk[0][0]
-            chunk_end   = current_chunk[-1][1]
-            current_len = chunk_end - chunk_start
+        expected_len = current_length + seg_len
 
-            # 새 seg를 합친 예상 길이
-            if (current_len + seg_len) > max_len + eps:
-                # 이미 모은 청크를 flush하고, seg는 새 청크로 시작
-                flush_chunk()
+        # Flush if adding this segment exceeds max_len
+        if expected_len > max_len:
+            current_chunk = flush_chunk()
+            current_length = 0.0
 
-        # 3) current_chunk가 비어 있으면 바로 seg 추가, 아니면 이어붙임
+        # Add to current chunk
         if not current_chunk:
             current_chunk = [(start, end)]
+            current_length = seg_len
         else:
             current_chunk.append((start, end))
+            current_length = end - current_chunk[0][0]
 
-    # 반복문 종료 후 남은 chunk도 flush
+    # Final flush
     flush_chunk()
-
     return final_segments
 
 def cut_segments_ffmpeg(infile, segments, outdir, sub_batch_size=20):
