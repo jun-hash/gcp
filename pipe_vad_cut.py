@@ -302,143 +302,164 @@ def process_vad(
 
 
 # -------------------------------------------------
-# Cutting
+# Cutting (FFmpeg-based)
 # -------------------------------------------------
-def save_cuts_batch(cuts, output_dir, batch_size=32):
-    """배치로 여러 파일을 저장"""
-    with ThreadPoolExecutor(max_workers=batch_size) as executor:
-        futures = []
-        for seq, fname, index, extension in cuts:
-            output = np.hstack(seq)
-            file_name = pathlib.Path(output_dir) / fname.name / (fname.stem + f"_{index:04}{extension}")
-            file_name.parent.mkdir(exist_ok=True, parents=True)
-            
-            future = executor.submit(sf.write, file_name, output, samplerate=44100)
-            futures.append(future)
-            
-            # 배치 크기만큼 차면 저장 완료 대기
-            if len(futures) >= batch_size:
-                for f in futures:
-                    f.result()
-                futures = []
-        
-        # 남은 파일들 처리
-        for f in futures:
-            f.result()
+def unify_vad_segments(vad_list, min_len=15.0, max_len=30.0):
+    """Unifies VAD segments into min_len~max_len chunks."""
+    final_segments = []
+    current_chunk = []
+    current_length = 0.0
 
-def process_audio_segments(data, samplerate, vad, min_len_sec=15, max_len_sec=30):
-    """오디오 세그먼트 처리를 위한 제너레이터"""
-    to_stitch = []
-    length_accumulated = 0.0
+    def flush_chunk():
+        if current_chunk:
+            seg_start = current_chunk[0][0]
+            seg_end = current_chunk[-1][1]
+            length = seg_end - seg_start
+            if length >= min_len:
+                final_segments.append((seg_start, seg_end))
+        return []
 
-    for segment in vad:
-        start, end = segment['start'], segment['end']
-        current_length = end - start
+    for seg in vad_list:
+        start = seg["start"]
+        end = seg["end"]
+        seg_len = end - start
 
-        # 30초 초과 세그먼트는 30초 단위로 분할
-        if current_length > max_len_sec:
-            # 30초씩 자르기
-            for t_start in np.arange(start, end, max_len_sec):
-                t_end = min(t_start + max_len_sec, end)
-                seg_length = t_end - t_start
-                
-                # 15초 이상인 경우만 저장
-                if seg_length >= min_len_sec:
-                    start_idx = int(t_start * samplerate)
-                    end_idx = int(t_end * samplerate)
-                    slice_audio = data[start_idx:end_idx]
-                    yield [slice_audio], seg_length
+        # Split long segments into max_len pieces
+        if seg_len > max_len:
+            current_chunk = flush_chunk()
+            t = start
+            while t < end:
+                t_next = min(t + max_len, end)
+                piece_len = t_next - t
+                if piece_len >= min_len:
+                    final_segments.append((t, t_next))
+                t = t_next
             continue
 
-        # 현재 구간을 추가했을 때의 예상 길이
-        expected_length = length_accumulated + current_length
+        expected_len = current_length + seg_len
 
-        # 30초를 초과하게 되면
-        if expected_length > max_len_sec:
-            # 현재까지 모은 것이 15초 이상이면 저장
-            if len(to_stitch) > 0 and min_len_sec <= length_accumulated <= max_len_sec:
-                yield to_stitch, length_accumulated
-            # 새로운 구간 시작
-            to_stitch = []
-            length_accumulated = 0.0
+        # Flush if adding this segment exceeds max_len
+        if expected_len > max_len:
+            current_chunk = flush_chunk()
+            current_length = 0.0
 
-        # 현재 구간 추가
-        start_idx = int(start * samplerate)
-        end_idx = int(end * samplerate)
-        slice_audio = data[start_idx:end_idx]
-        to_stitch.append(slice_audio)
-        length_accumulated += current_length
+        # Add to current chunk
+        if not current_chunk:
+            current_chunk = [(start, end)]
+            current_length = seg_len
+        else:
+            current_chunk.append((start, end))
+            current_length = end - current_chunk[0][0]
 
-    # 마지막 조각 처리
-    if to_stitch and min_len_sec <= length_accumulated <= max_len_sec:
-        yield to_stitch, length_accumulated
+    # Final flush
+    flush_chunk()
+    return final_segments
 
-def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, out_extension=".mp3"):
-    """
-    VAD 구간을 순회하며 min_len_sec ~ max_len_sec 사이의 오디오 조각 생성
-    배치 처리를 통한 성능 향상
-    """
-    data, samplerate = sf.read(audio_path)
+def cut_segments_ffmpeg(infile, segments, outdir, sub_batch_size=20):
+    """Cuts audio segments using ffmpeg with copy codec."""
+    infile = str(infile)
+    outdir = pathlib.Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    base_name = pathlib.Path(infile).stem
 
-    # stereo -> mono
-    if len(data.shape) == 2 and data.shape[1] == 2:
-        data = data.mean(axis=1)
+    base_cmd = [
+        "ffmpeg",
+        "-hide_banner", "-loglevel", "error",
+        "-y",
+        "-i", infile,
+        "-map_metadata", "-1",
+    ]
 
-    if samplerate != 44100:
-        raise ValueError(f"{audio_path} samplerate {samplerate} != 44100")
+    for i in range(0, len(segments), sub_batch_size):
+        sub = segments[i:i + sub_batch_size]
+        cmd_parts = []
+        for idx, (start, end) in enumerate(sub):
+            duration = round(end - start, 3)
+            seg_idx = i + idx
+            out_path = outdir / f"{base_name}_{seg_idx:04d}.mp3"
+            cmd_parts += [
+                "-ss", str(round(start, 3)),
+                "-t", str(duration),
+                "-c:a", "copy",
+                str(out_path)
+            ]
 
-    # 세그먼트 처리 및 배치 저장 준비
-    cuts_batch = []
-    segment_index = 0
-    fname = pathlib.Path(audio_path)
+        cmd = base_cmd + cmd_parts
 
-    for segments, length in process_audio_segments(data, samplerate, vad, min_len_sec, max_len_sec):
-        cuts_batch.append((segments, fname, segment_index, out_extension))
-        segment_index += 1
-
-        # 배치 크기에 도달하면 저장
-        if len(cuts_batch) >= 32:
-            save_cuts_batch(cuts_batch, output_dir)
-            cuts_batch = []
-
-    # 남은 배치 처리
-    if cuts_batch:
-        save_cuts_batch(cuts_batch, output_dir)
-
-def process_batch(args):
-    """배치 단위 처리를 위한 작업자 함수"""
-    batch, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension = args
-    results = []
-    
-    for json_file in batch:
         try:
-            with open(json_file, 'r') as f:
-                data = json.load(f)
-            vad = data.get("voice_activity", [])
-            rel_path = os.path.relpath(json_file, vad_dir)
-            audio_path = os.path.join(audio_dir, os.path.splitext(rel_path)[0] + '.mp3')
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError:
+            # Fallback to re-encoding if copy fails
+            tqdm.tqdm.write(f"[WARN] -c copy failed => re-encoding sub-batch for {infile}")
+            cmd_parts_re = []
+            for idx, (start, end) in enumerate(sub):
+                duration = round(end - start, 3)
+                seg_idx = i + idx
+                out_path = outdir / f"{base_name}_{seg_idx:04d}.mp3"
+                cmd_parts_re += [
+                    "-ss", str(round(start, 3)),
+                    "-t", str(duration),
+                    "-b:a", "128k",
+                    "-acodec", "libmp3lame",
+                    str(out_path)
+                ]
+            cmd_reencode = base_cmd + cmd_parts_re
+            try:
+                subprocess.run(cmd_reencode, check=True)
+            except subprocess.CalledProcessError as e:
+                tqdm.tqdm.write(f"[ERROR] Even re-encoding failed => skip sub-batch. {e}")
 
-            if not os.path.exists(audio_path):
-                print(f"[Cut] Audio file not found: {audio_path}")
-                continue
+def _process_cut_single(args):
+    """Worker function for cutting audio files."""
+    json_file, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec = args
+    rel_path = os.path.relpath(json_file, vad_dir)
+    audio_path = os.path.join(audio_dir, os.path.splitext(rel_path)[0] + ".mp3")
 
-            out_subdir = os.path.join(output_dir, os.path.dirname(rel_path))
-            cut_sequence(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
-            results.append(audio_path)
-        except Exception as e:
-            print(f"[Cut] Error cutting {json_file}: {e}")
-    return results
+    if not os.path.exists(audio_path):
+        return f"[WARN] Audio file not found for {json_file}"
 
-def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, out_extension=".mp3", 
-               test_sample=None, n_processes=1, batch_size=100):
-    """
-    병렬 처리와 배치 처리를 결합한 메인 처리 함수
-    """
-    # JSON 파일 수집
+    try:
+        with open(json_file, "r") as f:
+            data = json.load(f)
+        raw_vad = data.get("voice_activity", [])
+
+        # Merge/split into min_len~max_len segments
+        merged_segments = unify_vad_segments(raw_vad, min_len_sec, max_len_sec)
+        if not merged_segments:
+            return f"[INFO] No valid segments in {json_file}"
+
+        # Cut using ffmpeg
+        out_dir_final = os.path.join(output_dir, os.path.dirname(rel_path))
+        pathlib.Path(out_dir_final).mkdir(parents=True, exist_ok=True)
+
+        cut_segments_ffmpeg(
+            infile=audio_path,
+            segments=merged_segments,
+            outdir=out_dir_final,
+            sub_batch_size=20
+        )
+        return f"[OK] {audio_path} => {len(merged_segments)} segments"
+
+    except Exception as e:
+        return f"[ERROR] Failed to process {json_file}: {e}"
+
+def process_cut(
+    vad_dir,
+    audio_dir, 
+    output_dir,
+    min_len_sec=15,
+    max_len_sec=30,
+    out_extension=".mp3",
+    test_sample=None,
+    n_processes=1,
+    batch_size=100
+):
+    """Main function for cutting audio segments using ffmpeg."""
+    # Collect VAD JSON files
     json_files = []
     for root, _, files in os.walk(vad_dir):
         for file in files:
-            if file.lower().endswith('.json'):
+            if file.lower().endswith(".json"):
                 json_files.append(os.path.join(root, file))
 
     if test_sample:
@@ -447,19 +468,18 @@ def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, 
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # 배치 단위로 작업 생성
-    batches = [json_files[i:i + batch_size] for i in range(0, len(json_files), batch_size)]
-    
-    # 작업자 함수에 전달할 인자 준비
+    # Prepare tasks
     tasks = [
-        (batch, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension)
-        for batch in batches
+        (jf, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec)
+        for jf in json_files
     ]
 
-    # 배치 단위 병렬 처리
+    # Process in parallel
     with multiprocessing.Pool(processes=n_processes) as pool:
-        with tqdm.tqdm(total=len(tasks), desc="Processing Batches", ncols=80) as pbar:
-            for _ in pool.imap_unordered(process_batch, tasks):
+        with tqdm.tqdm(total=len(tasks), desc="Cutting Audio", ncols=80) as pbar:
+            for msg in pool.imap_unordered(_process_cut_single, tasks):
+                if msg.startswith("[ERROR]") or msg.startswith("[WARN]"):
+                    tqdm.tqdm.write(msg)
                 pbar.update()
 
     print("[Cut] Completed cutting.")
