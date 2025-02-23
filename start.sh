@@ -15,10 +15,10 @@ python3 -m venv venv
 source venv/bin/activate
 git clone https://github.com/jun-hash/gcp.git
 cd gcp
-pip install -r requirements.txt
 tmux new -s my
-cd ../
 source venv/bin/activate
 cd gcp
+pip install -r requirements.txt
+
 python pipe_vad_cut.py
-python pipe_vad_cut.py --gcs_prefix v10
+python pipe_vad_cut.py --gcs_prefix v15
