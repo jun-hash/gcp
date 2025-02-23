@@ -21,3 +21,4 @@ cd ../
 source venv/bin/activate
 cd gcp
 python pipe_vad_cut.py
+python pipe_vad_cut.py --gcs_prefix v7
