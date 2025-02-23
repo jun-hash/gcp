@@ -797,13 +797,6 @@ def parse_args():
 
     return args
 
-def main():
-    args = parse_args()
-    run_pipeline(args)
-
-if __name__ == "__main__":
-    main()
-
 def measure_segment_stats(dir_path, ext=".mp3", max_workers=8):
     """
     Measures audio segment statistics in dir_path:
@@ -846,3 +839,10 @@ def measure_segment_stats(dir_path, ext=".mp3", max_workers=8):
     max_dur = max(durations)
 
     return avg_dur, min_dur, max_dur, count
+
+def main():
+    args = parse_args()
+    run_pipeline(args)
+
+if __name__ == "__main__":
+    main()
