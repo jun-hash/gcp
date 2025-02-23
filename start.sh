@@ -21,4 +21,4 @@ cd gcp
 pip install -r requirements.txt
 
 python pipe_vad_cut.py
-python pipe_vad_cut.py --gcs_prefix v15
+python pipe_vad_cut.py --gcs_prefix v18
