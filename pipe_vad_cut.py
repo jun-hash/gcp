@@ -326,7 +326,7 @@ def save_cuts_batch(cuts, output_dir, batch_size=32):
         for f in futures:
             f.result()
 
-def process_audio_segments(data, samplerate, vad, min_len_sec, max_len_sec):
+def process_audio_segments(data, samplerate, vad, min_len_sec=15, max_len_sec=30):
     """오디오 세그먼트 처리를 위한 제너레이터"""
     to_stitch = []
     length_accumulated = 0.0
@@ -337,12 +337,12 @@ def process_audio_segments(data, samplerate, vad, min_len_sec, max_len_sec):
 
         # 30초 초과 세그먼트는 30초 단위로 분할
         if current_length > max_len_sec:
-            # 30초 단위로 나누기
-            time_points = np.arange(start, end, max_len_sec)
-            for t_start in time_points:
+            # 30초씩 자르기
+            for t_start in np.arange(start, end, max_len_sec):
                 t_end = min(t_start + max_len_sec, end)
                 seg_length = t_end - t_start
                 
+                # 15초 이상인 경우만 저장
                 if seg_length >= min_len_sec:
                     start_idx = int(t_start * samplerate)
                     end_idx = int(t_end * samplerate)
@@ -350,15 +350,21 @@ def process_audio_segments(data, samplerate, vad, min_len_sec, max_len_sec):
                     yield [slice_audio], seg_length
             continue
 
-        # 나머지 일반적인 처리 (기존 코드)
+        # 현재 구간을 추가했을 때의 예상 길이
         expected_length = length_accumulated + current_length
+
+        # 30초를 초과하게 되면
         if expected_length > max_len_sec:
-            if len(to_stitch) > 0 and length_accumulated >= min_len_sec:
+            # 현재까지 모은 것이 15초 이상이면 저장
+            if len(to_stitch) > 0 and min_len_sec <= length_accumulated <= max_len_sec:
                 yield to_stitch, length_accumulated
+            # 새로운 구간 시작
             to_stitch = []
             length_accumulated = 0.0
 
-        start_idx, end_idx = int(start * samplerate), int(end * samplerate)
+        # 현재 구간 추가
+        start_idx = int(start * samplerate)
+        end_idx = int(end * samplerate)
         slice_audio = data[start_idx:end_idx]
         to_stitch.append(slice_audio)
         length_accumulated += current_length
