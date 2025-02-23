@@ -319,84 +319,68 @@ def save_cut(seq, fname, index, extension, output_dir):
 
 def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, out_extension=".mp3"):
     """
-    VAD 구간을 순회하며 min_len_sec ~ max_len_sec 사이의 오디오 조각을 생성
-    모든 결과물이 15-30초 범위 안에 들어가도록 보장
+    VAD 구간을 순회하며 min_len_sec ~ max_len_sec 사이의 오디오 조각 생성
+    - 30초 초과 세그먼트는 30초 단위로 분할
     """
     data, samplerate = sf.read(audio_path)
 
     # stereo -> mono
+    # soundfile.read()는 (samples, channels) shape (stereo라면 shape=(N,2))
     if len(data.shape) == 2 and data.shape[1] == 2:
-        data = data.mean(axis=1)
+        data = data.mean(axis=1)  # 모노화 (N,)
 
     if samplerate != 44100:
+        # 만약 표본율이 달라도 44.1kHz로 맞추고 싶다면, librosa 등으로 재샘플링 가능
+        # 여기서는 단순 경고 or 처리
         raise ValueError(f"{audio_path} samplerate {samplerate} != 44100")
 
-    to_stitch = []  # 현재 합치고 있는 구간들
-    length_accumulated = 0.0  # 현재까지 합친 구간의 총 길이
-    segment_index = 0  # 출력 파일 인덱스
-    
-    def get_segment_length(segment):
-        """VAD 세그먼트의 길이(초)를 반환"""
-        return segment['end'] - segment['start']
-    
-    def save_current_segment():
-        """현재까지 모은 구간을 저장"""
-        nonlocal to_stitch, length_accumulated, segment_index
-        if to_stitch and min_len_sec <= length_accumulated <= max_len_sec:
-            save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
-            segment_index += 1
+    to_stitch = []
+    length_accumulated = 0.0
+    segment_index = 0
+
+    for segment in vad:
+        start, end = segment['start'], segment['end']
+        current_length = end - start
+
+        # 30초 초과 세그먼트 처리
+        if current_length > max_len_sec:
+            # 30초 단위로 분할
+            time_points = np.arange(start, end, max_len_sec)
+            for t_start in time_points:
+                t_end = min(t_start + max_len_sec, end)
+                seg_length = t_end - t_start
+                
+                if seg_length >= min_len_sec:
+                    # 분할된 세그먼트를 저장
+                    start_idx = int(t_start * samplerate)
+                    end_idx = int(t_end * samplerate)
+                    slice_audio = data[start_idx:end_idx]
+                    save_cut([slice_audio], pathlib.Path(audio_path), 
+                            segment_index, out_extension, output_dir)
+                    segment_index += 1
+            continue
+
+        # 일반적인 세그먼트 처리 (기존 로직)
+        expected_length = length_accumulated + current_length
+        if expected_length > max_len_sec:
+            if len(to_stitch) > 0 and length_accumulated >= min_len_sec:
+                save_cut(to_stitch, pathlib.Path(audio_path), 
+                        segment_index, out_extension, output_dir)
+                segment_index += 1
             to_stitch = []
             length_accumulated = 0.0
-            return True
-        return False
 
-    # VAD 구간들을 순회하면서 처리
-    i = 0
-    while i < len(vad):
-        current_segment = vad[i]
-        current_length = get_segment_length(current_segment)
-        
-        # 현재 구간을 추가했을 때의 예상 길이 계산
-        expected_length = length_accumulated + current_length
-        
-        # Case 1: 현재 구간 하나만으로도 너무 긴 경우
-        if current_length > max_len_sec:
-            print(f"[Cut] Skipping too long segment: {current_length:.2f}s")
-            i += 1
-            continue
-            
-        # Case 2: 현재 구간을 추가하면 max_len을 초과하는 경우
-        if expected_length > max_len_sec:
-            if length_accumulated >= min_len_sec:
-                save_current_segment()
-            else:
-                # 이전 구간이 min_len보다 작으면 현재 구간 강제 추가
-                start, end = current_segment['start'], current_segment['end']
-                start_idx, end_idx = int(start * samplerate), int(end * samplerate)
-                to_stitch.append(data[start_idx:end_idx])
-                length_accumulated = expected_length
-                i += 1
-        
-        # Case 3: 현재 구간을 안전하게 추가할 수 있는 경우
-        else:
-            start, end = current_segment['start'], current_segment['end']
-            start_idx, end_idx = int(start * samplerate), int(end * samplerate)
-            to_stitch.append(data[start_idx:end_idx])
-            length_accumulated = expected_length
-            i += 1
-            
-            # 다음 구간까지 고려했을 때 max_len을 초과할 것 같으면 현재까지 저장
-            if i < len(vad):
-                next_length = get_segment_length(vad[i])
-                if length_accumulated + next_length > max_len_sec and length_accumulated >= min_len_sec:
-                    save_current_segment()
+        start_idx, end_idx = int(start * samplerate), int(end * samplerate)
+        slice_audio = data[start_idx:end_idx]
+        to_stitch.append(slice_audio)
+        length_accumulated += current_length
 
-    # 마지막 남은 구간 처리
+    # 마지막 조각이 남았으면, min_len_sec ~ max_len_sec 사이일 때만 저장
     if to_stitch:
-        if length_accumulated >= min_len_sec:
-            save_current_segment()
+        if min_len_sec <= length_accumulated <= max_len_sec:
+            save_cut(to_stitch, pathlib.Path(audio_path), segment_index, out_extension, output_dir)
         else:
-            print(f"[Cut] Discarding final segment (too short): {length_accumulated:.2f}s")
+            print(f"[Cut] Discarding segment (length={length_accumulated:.2f}s not in [{min_len_sec}, {max_len_sec}]) => {audio_path}")
 
 def _process_cut_single(args):
     """Cut 처리 작업자 함수"""
