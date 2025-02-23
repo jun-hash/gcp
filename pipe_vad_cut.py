@@ -245,32 +245,56 @@ def _process_vad_single(args):
         print(f"[ERROR] VAD processing failed for {audio_path}: {str(e)}")
         return None, None
 
-def process_vad(input_dir, output_dir, sample_rate=16000, min_speech_duration=0.5, test_sample=None, n_processes=1):
+def process_vad(
+    input_dir,
+    output_dir,
+    sample_rate=16000,
+    min_speech_duration=0.5,
+    test_sample=None,
+    n_processes=1
+):
     """
     VAD 처리 메인 함수
     """
-    # 모델은 이미 전역에서 로드됨
+    # 1) 입력 디렉토리 내 MP3 파일 수집
     audio_files = []
     for root, _, files in os.walk(input_dir):
         for file in files:
             if file.lower().endswith('.mp3'):
                 audio_files.append(os.path.join(root, file))
 
+    # 2) 샘플링(테스트용) 
     if test_sample:
         audio_files = audio_files[:test_sample]
 
     print(f"[VAD] Found {len(audio_files)} audio files.")
     os.makedirs(output_dir, exist_ok=True)
 
-    tasks = [(audio_path, input_dir, sample_rate, min_speech_duration) for audio_path in audio_files]
+    # 3) 이미 처리된 파일 스킵하기
+    tasks = []
+    for audio_path in audio_files:
+        rel_path = os.path.relpath(audio_path, input_dir)
+        json_out = os.path.join(output_dir, os.path.splitext(rel_path)[0] + '.json')
 
+        # 이미 결과 파일이 존재하면 스킵
+        if os.path.exists(json_out):
+            print(f"[VAD] Skipped already processed file: {rel_path}")
+            continue
+
+        tasks.append((audio_path, input_dir, sample_rate, min_speech_duration))
+
+    print(f"[VAD] Processing {len(tasks)} files (others skipped).")
+
+    # 4) 멀티프로세스를 활용한 처리
     with multiprocessing.Pool(processes=n_processes) as pool:
         with tqdm.tqdm(total=len(tasks), desc="VAD Processing", ncols=80) as pbar:
             for rel_path, segments in pool.imap_unordered(_process_vad_single, tasks):
                 if rel_path is not None and segments is not None:
+                    # 결과 저장
                     json_out = os.path.join(output_dir, os.path.splitext(rel_path)[0] + '.json')
                     os.makedirs(os.path.dirname(json_out), exist_ok=True)
                     save_vad_results(os.path.join(input_dir, rel_path), segments, json_out)
+                    print(f"[VAD] Processed file: {rel_path}")
                 pbar.update()
 
     print("[VAD] Processing completed.")
@@ -279,6 +303,176 @@ def process_vad(input_dir, output_dir, sample_rate=16000, min_speech_duration=0.
 # -------------------------------------------------
 # Cutting
 # -------------------------------------------------
+def cut_sequence_strict_15_30(
+    audio_path,
+    vad,                    # [{"start": ..., "end": ...}, ...]
+    output_dir,
+    min_len_sec=15,
+    max_len_sec=30,
+    out_extension=".mp3"
+):
+    """
+    VAD 구간들을 순회하며, 최종적으로 "15초~30초" 범위를 엄격히 지키는 세그먼트만을
+    순차적으로 만들고, 'save_cut'으로 저장한다.
+    
+    구체 동작:
+      1) 파일을 읽어 모노(44100)로 준비
+      2) 각 VAD segment(초 단위)를 음성파 형태로 자른 다음, leftover와 합친다.
+         - leftover + 이번 segment가 30초를 넘으면 '초과분'을 30초가 될 때까지만 붙이고,
+           그 chunk를 30초짜리로 flush(저장)한다. 남은 segment 파편이 있으면 또 30초에 도달할 때까지 잘라서
+           여러 번 flush할 수 있음. (단, flush 시점에 최소 15초 이상은 이미 만족됨)
+      3) leftover가 아직 15초 미만이라도, 다음 segment를 기다리며 붙인다.
+      4) VAD 구간 처리가 끝난 뒤, leftover가 15초 이상 ~ 30초 이하라면 마지막으로 flush;
+         15초 미만이면 폐기.
+    """
+    data, samplerate = sf.read(audio_path)
+
+    # (1) stereo -> mono
+    if len(data.shape) == 2 and data.shape[1] == 2:
+        data = data.mean(axis=1)  # (N,)
+
+    # (2) samplerate 검증
+    if samplerate != 44100:
+        raise ValueError(f"{audio_path} samplerate {samplerate} != 44100")
+
+    # to_stitch: 이어붙일 파편 리스트 (numpy 배열들)
+    # length_accumulated: 현재 leftover의 총 길이(초)
+    to_stitch = []
+    length_accumulated = 0.0
+    segment_index = 0  # 저장 파일 인덱스
+
+    def flush_current_buffer(strict=True):
+        """
+        지금까지 모아 둔 to_stitch를 하나의 파일로 저장하고,
+        to_stitch / length_accumulated 를 초기화한다.
+        strict=True면, flush 전 length가 반드시 15초 이상 ~ 30초 이하임이 보장된 상태에서 호출해야 한다.
+        """
+        nonlocal to_stitch, length_accumulated, segment_index
+
+        if not to_stitch:
+            return  # 비어 있으면 아무것도 안 함
+
+        output = np.hstack(to_stitch)  # 시간축으로 합침
+        actual_len_sec = length_accumulated
+
+        # 저장
+        file_name = (
+            pathlib.Path(output_dir)
+            / pathlib.Path(audio_path).name
+            / (pathlib.Path(audio_path).stem + f"_{segment_index:04}{out_extension}")
+        )
+        file_name.parent.mkdir(exist_ok=True, parents=True)
+
+        sf.write(file_name, output, samplerate=44100)
+        print(f"[Cut] Save: {file_name} ({actual_len_sec:.2f}s)")
+
+        # flush
+        segment_index += 1
+        to_stitch = []
+        length_accumulated = 0.0
+
+    # (3) main loop: VAD 구간마다 처리
+    for seg in vad:
+        seg_start_sec = seg["start"]
+        seg_end_sec   = seg["end"]
+        seg_len_sec   = seg_end_sec - seg_start_sec
+
+        if seg_len_sec <= 0:
+            continue  # 이상한 구간 무시
+
+        # segment 오디오 추출
+        start_idx = int(seg_start_sec * samplerate)
+        end_idx   = int(seg_end_sec   * samplerate)
+        seg_audio = data[start_idx:end_idx]
+
+        # (3-1) seg_audio를 여러 번 잘라서 leftover에 합친다
+        #       leftover + part_of_seg <= 30 이면 붙인다
+        #       넘어가면 flush, leftover가 15초 미만이면??
+        #       => leftover가 0 이상 ~ 30초 미만이라는 전제
+        #          partial chunk를 더해 30초에 맞춰 flush.
+
+        # seg_audio를 "소진"할 때까지 반복
+        offset = 0
+        seg_total_samples = len(seg_audio)
+
+        def seconds_to_samples(sec):
+            return int(math.floor(sec * samplerate))
+
+        while offset < seg_total_samples:
+            leftover_can_fill_sec = max_len_sec - length_accumulated
+            # 남은 샘플로 환산
+            leftover_can_fill_samples = seconds_to_samples(leftover_can_fill_sec)
+
+            # 이번 segment 남은 길이(샘플)
+            seg_remaining_samples = seg_total_samples - offset
+            seg_remaining_sec = seg_remaining_samples / samplerate
+
+            # 만약 leftover에 seg_remaining 전부 넣어도 30초가 안 넘는다면 => 통째로 붙임
+            if seg_remaining_sec <= leftover_can_fill_sec:
+                to_stitch.append(seg_audio[offset : offset + seg_remaining_samples])
+                length_accumulated += seg_remaining_sec
+                offset += seg_remaining_samples
+            else:
+                # leftover를 30초로 정확히 맞추기 위해 필요한 부분만 잘라 붙임
+                needed_samples = leftover_can_fill_samples
+                to_stitch.append(seg_audio[offset : offset + needed_samples])
+                length_accumulated += (needed_samples / samplerate)
+                offset += needed_samples
+
+            # 혹시 leftover가 30초가 되면 -> flush
+            # 단, flush하기 전에 leftover가 15초 미만이면(=0~15), 세그먼트가 유효하지 않으니 어떡할까?
+            # => 여기서는 "현재 leftover가 30초 정확히 찼다" == 30초가 되었다면, 이는 15초도 당연히 넘으니 즉시 flush.
+            if abs(length_accumulated - max_len_sec) < 1e-7:  # float 오차 고려
+                # 지금 leftover는 정확히 30초
+                flush_current_buffer(strict=True)  # -> 30초짜리로 저장
+                # flush 후 leftover=0, to_stitch=[]
+
+    # (4) 모든 VAD segment 처리 끝.
+    # leftover 길이가 15초 이상이면 flush, 미만이면 버림
+    if length_accumulated >= min_len_sec:
+        # leftover <= 30초인지 확인
+        if length_accumulated <= max_len_sec:
+            flush_current_buffer(strict=True)
+        else:
+            # 이론상 여기 오기 어려우나, leftover가 30초 초과라면
+            # 남은 걸 30초 단위로 쪼개야 함 (edge case가 있을 수 있음)
+            # 아래는 간단 구현 예:
+            print(f"[Cut] leftover= {length_accumulated:.2f}s > 30, additional chunking needed.")
+            # 반복해서 잘라 30초씩 flush
+            leftover_array = np.hstack(to_stitch)
+            leftover_samples = len(leftover_array)
+            offset = 0
+            while offset < leftover_samples:
+                remain = leftover_samples - offset
+                remain_sec = remain / samplerate
+                if remain_sec >= max_len_sec:
+                    # 30초 chunk
+                    chunk_size = seconds_to_samples(max_len_sec)
+                    chunk = leftover_array[offset : offset + chunk_size]
+                    offset += chunk_size
+
+                    # flush
+                    to_stitch = [chunk]
+                    length_accumulated = max_len_sec
+                    flush_current_buffer(strict=True)
+                else:
+                    # 마지막 조각
+                    if remain_sec >= min_len_sec:
+                        # flush it
+                        to_stitch = [leftover_array[offset : offset + remain]]
+                        length_accumulated = remain_sec
+                        flush_current_buffer(strict=True)
+                    else:
+                        # 버림
+                        print(f"[Cut] Final leftover {remain_sec:.2f}s < 15, discarding.")
+                    break
+    else:
+        # < 15초 leftover
+        if length_accumulated > 0:
+            print(f"[Cut] Last leftover {length_accumulated:.2f}s < 15, discarding => {audio_path}")
+
+
+
 def save_cut(seq, fname, index, extension, output_dir):
     """
     seq: list of np arrays(음성 조각)

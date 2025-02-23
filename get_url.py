@@ -15,8 +15,8 @@ import numpy as np
 # 상수 정의
 DEFAULT_LANGUAGE = "English"
 DEFAULT_API_LIMIT = 50
-TARGET_TOTAL_DURATION_HOURS = 33000
-MAX_READER_DURATION = 12.6 * 3600  # 각 화자의 최대 녹음 시간: 12시간(21600초)
+TARGET_TOTAL_DURATION_HOURS = 36526.27
+MAX_READER_DURATION = 14 * 3600  # 각 화자의 최대 녹음 시간: 12시간(21600초)
 MAX_RETRIES = 1
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
