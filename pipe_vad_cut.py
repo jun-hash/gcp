@@ -391,6 +391,30 @@ def cut_sequence(audio_path, vad, output_dir, min_len_sec=15, max_len_sec=30, ou
     if cuts_batch:
         save_cuts_batch(cuts_batch, output_dir)
 
+def process_batch(args):
+    """배치 단위 처리를 위한 작업자 함수"""
+    batch, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension = args
+    results = []
+    
+    for json_file in batch:
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+            vad = data.get("voice_activity", [])
+            rel_path = os.path.relpath(json_file, vad_dir)
+            audio_path = os.path.join(audio_dir, os.path.splitext(rel_path)[0] + '.mp3')
+
+            if not os.path.exists(audio_path):
+                print(f"[Cut] Audio file not found: {audio_path}")
+                continue
+
+            out_subdir = os.path.join(output_dir, os.path.dirname(rel_path))
+            cut_sequence(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
+            results.append(audio_path)
+        except Exception as e:
+            print(f"[Cut] Error cutting {json_file}: {e}")
+    return results
+
 def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, out_extension=".mp3", 
                test_sample=None, n_processes=1, batch_size=100):
     """
@@ -412,31 +436,16 @@ def process_cut(vad_dir, audio_dir, output_dir, min_len_sec=15, max_len_sec=30, 
     # 배치 단위로 작업 생성
     batches = [json_files[i:i + batch_size] for i in range(0, len(json_files), batch_size)]
     
-    def process_batch(batch):
-        results = []
-        for json_file in batch:
-            try:
-                with open(json_file, 'r') as f:
-                    data = json.load(f)
-                vad = data.get("voice_activity", [])
-                rel_path = os.path.relpath(json_file, vad_dir)
-                audio_path = os.path.join(audio_dir, os.path.splitext(rel_path)[0] + '.mp3')
-
-                if not os.path.exists(audio_path):
-                    print(f"[Cut] Audio file not found: {audio_path}")
-                    continue
-
-                out_subdir = os.path.join(output_dir, os.path.dirname(rel_path))
-                cut_sequence(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
-                results.append(audio_path)
-            except Exception as e:
-                print(f"[Cut] Error cutting {json_file}: {e}")
-        return results
+    # 작업자 함수에 전달할 인자 준비
+    tasks = [
+        (batch, vad_dir, audio_dir, output_dir, min_len_sec, max_len_sec, out_extension)
+        for batch in batches
+    ]
 
     # 배치 단위 병렬 처리
     with multiprocessing.Pool(processes=n_processes) as pool:
-        with tqdm.tqdm(total=len(batches), desc="Processing Batches", ncols=80) as pbar:
-            for _ in pool.imap_unordered(process_batch, batches):
+        with tqdm.tqdm(total=len(tasks), desc="Processing Batches", ncols=80) as pbar:
+            for _ in pool.imap_unordered(process_batch, tasks):
                 pbar.update()
 
     print("[Cut] Completed cutting.")
