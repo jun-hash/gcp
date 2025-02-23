@@ -335,21 +335,29 @@ def process_audio_segments(data, samplerate, vad, min_len_sec, max_len_sec):
         start, end = segment['start'], segment['end']
         current_length = end - start
 
-        # 30초 초과 세그먼트는 스킵
+        # 30초 초과 세그먼트는 30초 단위로 분할
         if current_length > max_len_sec:
-            print(f"[Cut] Skipping too long segment: {current_length:.2f}s")
+            # 30초 단위로 나누기
+            time_points = np.arange(start, end, max_len_sec)
+            for t_start in time_points:
+                t_end = min(t_start + max_len_sec, end)
+                seg_length = t_end - t_start
+                
+                if seg_length >= min_len_sec:
+                    start_idx = int(t_start * samplerate)
+                    end_idx = int(t_end * samplerate)
+                    slice_audio = data[start_idx:end_idx]
+                    yield [slice_audio], seg_length
             continue
 
+        # 나머지 일반적인 처리 (기존 코드)
         expected_length = length_accumulated + current_length
-
-        # 누적 길이가 max_len_sec를 초과하면 저장
         if expected_length > max_len_sec:
             if len(to_stitch) > 0 and length_accumulated >= min_len_sec:
                 yield to_stitch, length_accumulated
             to_stitch = []
             length_accumulated = 0.0
 
-        # 현재 구간 추가
         start_idx, end_idx = int(start * samplerate), int(end * samplerate)
         slice_audio = data[start_idx:end_idx]
         to_stitch.append(slice_audio)
