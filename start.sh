@@ -11,6 +11,13 @@ sudo apt-get install -y python3-venv
 
 # 가상환경 생성 (myenv 라는 이름으로 생성)
 python3 -m venv venv
-
 # 가상환경 활성화
 source venv/bin/activate
+git clone https://github.com/jun-hash/gcp.git
+cd gcp
+pip install -r requirements.txt
+tmux new -s my
+cd ../
+source venv/bin/activate
+cd gcp
+python pipe_vad_cut.py

@@ -42,8 +42,8 @@ DEFAULT_SAMPLE_RATE         = 44100  # 이미 44.1kHz mp3를 받는다고 가정
 DEFAULT_N_PROCESSES         = multiprocessing.cpu_count()
 DEFAULT_MIN_SPEECH_DURATION = 0.5
 DEFAULT_TARGET_LEN_SEC      = 30
-DEFAULT_GCS_BUCKET          = "nari-librivox-test"
-DEFAULT_GCS_PREFIX          = "test"
+DEFAULT_GCS_BUCKET          = "nari-librivox"
+DEFAULT_GCS_PREFIX          = "v0"
 DEFAULT_FORMAT              = ".mp3"
 
 # (원하는 만큼 조정 가능)
@@ -544,7 +544,7 @@ def _process_cut_single(args):
             return
 
         out_subdir = os.path.join(output_dir, os.path.dirname(rel_path))
-        cut_sequence(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
+        cut_sequence_strict_15_30(audio_path, vad, out_subdir, min_len_sec, max_len_sec, out_extension)
     except Exception as e:
         print(f"[Cut] Error cutting {json_file}: {e}")
 
@@ -709,6 +709,15 @@ def run_pipeline(args):
         )
         stage_timer.end("cut")
 
+        # Add segment statistics after cutting
+        print("\n[Segment Statistics]")
+        avg_dur, min_dur, max_dur, count = measure_segment_stats(cut_dir, ext=".mp3")
+        print(f"  Total segments: {count:,}")
+        print(f"  Average duration: {avg_dur:.2f} seconds")
+        print(f"  Minimum duration: {min_dur:.2f} seconds")
+        print(f"  Maximum duration: {max_dur:.2f} seconds")
+        print(f"  Total duration: {(count * avg_dur / 3600):.2f} hours\n")
+
     # 4) Remove intro
     if "intro" in stages_to_run:
         stage_timer.start("intro")
@@ -769,7 +778,7 @@ def parse_args():
     parser.add_argument("--target_len_sec", type=int, default=DEFAULT_TARGET_LEN_SEC,
                         help="Max length for each cut segment")
 
-    parser.add_argument("--gcs_bucket", type=str, default=None, help="GCS bucket name")
+    parser.add_argument("--gcs_bucket", type=str, default=DEFAULT_GCS_BUCKET, help="GCS bucket name")
     parser.add_argument("--gcs_prefix", type=str, default=DEFAULT_GCS_PREFIX,
                         help="GCS path prefix (folder-like)")
     parser.add_argument("--cleanup_after_upload", action="store_true")
@@ -794,3 +803,46 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def measure_segment_stats(dir_path, ext=".mp3", max_workers=8):
+    """
+    Measures audio segment statistics in dir_path:
+    - Average duration (seconds)
+    - Minimum duration (seconds)
+    - Maximum duration (seconds) 
+    - Total file count
+    """
+    audio_files = []
+    for root, _, files in os.walk(dir_path):
+        for f in files:
+            if f.lower().endswith(ext):
+                audio_files.append(os.path.join(root, f))
+
+    durations = []
+
+    def get_length(fpath):
+        try:
+            info = sf.info(fpath)
+            return info.frames / info.samplerate
+        except:
+            return 0
+
+    # Measure lengths using multithreading
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(get_length, f) for f in audio_files]
+        for future in tqdm.tqdm(as_completed(futures), total=len(futures), 
+                              desc="Measuring segments", ncols=80):
+            dur = future.result()
+            if dur > 0:
+                durations.append(dur)
+
+    if not durations:
+        return 0.0, 0.0, 0.0, 0  # No data
+
+    total = sum(durations)
+    count = len(durations)
+    avg_dur = total / count
+    min_dur = min(durations)
+    max_dur = max(durations)
+
+    return avg_dur, min_dur, max_dur, count
