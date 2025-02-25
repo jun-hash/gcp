@@ -19,4 +19,3 @@ tmux new -s my
 source venv/bin/activate
 cd gcp
 pip install -r requirements.txt
-python pipe_vad_cut.py --gcs_prefix v20
