@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Run Fast Whisper v3 turbo ASR model on audio files from a local folder.
+Run Fast Whisper ASR model on audio files from a local folder.
+Uses faster-whisper package for improved performance.
 """
 
-import json
+import os
 import torch
 import librosa
 import numpy as np
@@ -11,32 +12,14 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import List
 import argparse
-import time  # 시간 측정용 추가
-import os  # 환경 변수 확인용 추가
-from faster_whisper import WhisperModel  # faster-whisper 사용
-
-
-def convert_to_serializable(obj):
-    """Convert numpy types to Python native types for JSON serialization."""
-    if isinstance(obj, (np.float16, np.float32, np.float64)):
-        return float(obj)
-    elif isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    return obj
-
+import time
+from faster_whisper import WhisperModel
 
 class ASRProcessor:
     def __init__(self, output_dir: str):
-        """
-        Initialize ASR processor with Fast Whisper v3 turbo model.
-
-        Args:
-            output_dir: Directory to save ASR results
-        """
+        """Initialize ASR processor with Fast Whisper model."""
         self.output_dir = Path(output_dir)
-
+        
         # 시간 측정 시작
         start_time = time.time()
         print("=== Fast Whisper 초기화 시간 측정 ===")
@@ -59,21 +42,19 @@ class ASRProcessor:
         model_load_start = time.time()
         try:
             self.model = WhisperModel(
-                "turbo", 
+                "large-v3", 
                 device=self.device, 
                 compute_type=self.compute_type,
-                # Add performance options
-                cpu_threads=8 if self.device == "cpu" else 4,  # CPU 모드일 때만 더 많은 스레드 사용
-                num_workers=4,  # 병렬 작업자 수 조정
+                cpu_threads=8 if self.device == "cpu" else 4,
+                num_workers=4,
             )
             print(f"모델 로드 성공: {self.device} 모드")
         except Exception as e:
             print(f"모델 로드 오류, CPU 모드로 폴백: {e}")
-            # 오류 발생 시 CPU 모드로 폴백
             self.device = "cpu"
             self.compute_type = "int8"
             self.model = WhisperModel(
-                "turbo", 
+                "large-v3", 
                 device="cpu", 
                 compute_type="int8",
                 cpu_threads=8,
@@ -86,10 +67,6 @@ class ASRProcessor:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create text output directory
-        self.text_output_dir = self.output_dir / "text"
-        self.text_output_dir.mkdir(parents=True, exist_ok=True)
-        
         # 처리 통계
         self.processed_count = 0
         self.skipped_count = 0
@@ -97,9 +74,7 @@ class ASRProcessor:
         print(f"[3] 전체 초기화 시간: {time.time() - start_time:.4f}초")
 
     def process_audio_file(self, audio_path: Path) -> bool:
-        """
-        Process a single audio file with Fast Whisper ASR.
-        """
+        """Process a single audio file with Fast Whisper ASR."""
         file_id = audio_path.stem
         
         # 이미 처리된 파일인지 확인
@@ -127,9 +102,8 @@ class ASRProcessor:
         transcribe_start = time.time()
         segments, info = self.model.transcribe(
             audio,
-            word_timestamps=False,  # 원래대로 유지
             language="en",
-            beam_size=2,
+            beam_size=5,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
         )
@@ -217,7 +191,7 @@ class ASRProcessor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Fast Whisper v3 turbo ASR model on audio files"
+        description="Run Fast Whisper ASR model on audio files"
     )
     parser.add_argument(
         "--audio-folder",
@@ -237,11 +211,6 @@ def main():
         nargs="+",
         default=[".wav", ".mp3", ".flac", ".m4a", ".ogg"],
         help="Audio file extensions to process",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force processing of all files, even if already processed",
     )
     args = parser.parse_args()
 

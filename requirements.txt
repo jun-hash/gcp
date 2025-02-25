@@ -4,10 +4,6 @@
 # faster-whisper 추가
 faster-whisper
 
-# GPU 지원을 위한 PyTorch (CUDA 지원)
-torch>=2.0.0
-torchaudio>=2.0.0
-torchvision>=0.15.0
 
 # 기타 필요한 패키지들
 numpy>=1.20.0
