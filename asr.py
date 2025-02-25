@@ -197,7 +197,7 @@ def main():
     parser.add_argument(
         "--audio-folder",
         type=str,
-        default="./data/v12_sample",
+        default="./data/cut",
         help="Folder containing audio files to process",
     )
     parser.add_argument(
