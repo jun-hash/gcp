@@ -727,7 +727,7 @@ def parse_args():
     parser.add_argument("--start_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
                        default="download", help="Start from this pipeline stage")
     parser.add_argument("--end_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
-                       default="upload", help="End at this pipeline stage")
+                       default="vad", help="End at this pipeline stage")
 
     args = parser.parse_args()
 
