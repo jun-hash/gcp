@@ -718,8 +718,8 @@ def parse_args():
     parser.add_argument("--target_len_sec", type=int, default=DEFAULT_TARGET_LEN_SEC,
                         help="Max length for each cut segment")
 
-    parser.add_argument("--gcs_bucket", type=str, default=DEFAULT_GCS_BUCKET, help="GCS bucket name")
-    parser.add_argument("--gcs_prefix", type=str, default=DEFAULT_GCS_PREFIX,
+    parser.add_argument("--gcs_bucket", type=str, default=None, help="GCS bucket name")
+    parser.add_argument("--gcs_prefix", type=str, default=None,
                         help="GCS path prefix (folder-like)")
     parser.add_argument("--cleanup_after_upload", action="store_true")
 
@@ -727,7 +727,7 @@ def parse_args():
     parser.add_argument("--start_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
                        default="download", help="Start from this pipeline stage")
     parser.add_argument("--end_stage", type=str, choices=list(PIPELINE_STAGES.keys()),
-                       default="vad", help="End at this pipeline stage")
+                       default="cut", help="End at this pipeline stage")
 
     args = parser.parse_args()
 
