@@ -17,3 +17,6 @@ source venv/bin/activate
 git clone https://github.com/jun-hash/gcp.git
 cd gcp
 pip install -r requirements.txt
+
+git pull origin main
+python pipe_vad_cut.py
