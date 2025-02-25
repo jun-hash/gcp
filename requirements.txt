@@ -5,3 +5,5 @@ torch
 torchaudio
 tqdm
 google-cloud-storage
+openai-whisper
+librosa
