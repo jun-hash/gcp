@@ -5,6 +5,6 @@ echo "=== Starting VAD processing ==="
 python pipe_vad_cut.py
 
 echo "=== Starting Whisper transcription ==="
-python whisper.py
+python asr.py
 
 echo "=== Processing complete ===" 
